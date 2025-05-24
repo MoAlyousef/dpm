@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -6,8 +7,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[derive(Deserialize, Serialize)]
-struct Nix {
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Dpm {
+    update: String,
+    upgrade: String,
+    install: String,
+    uninstall: String,
     packages: Vec<String>,
 }
 
@@ -24,12 +29,14 @@ struct Args {
 enum Commands {
     /// Switch to the new configuration
     Switch,
-    /// List nixme generations
+    /// List dpm generations
     List,
     /// Rollsback to a previous generation
-    Rollback { generation: String },
-    /// Runs nix-collect-garbage
-    Gc,
+    Rollback { generation: Option<String> },
+    /// Update package list
+    Update,
+    /// Upgrade packages
+    Upgrade,
 }
 
 fn extract_gen(s: &fs::DirEntry) -> i32 {
@@ -44,18 +51,18 @@ fn extract_gen(s: &fs::DirEntry) -> i32 {
 fn generation_files(dir: impl AsRef<Path>) -> anyhow::Result<Vec<fs::DirEntry>> {
     let mut paths: Vec<_> = fs::read_dir(dir.as_ref())?.filter_map(Result::ok).collect();
     paths.sort_by_key(extract_gen);
-    Ok(paths)
+    Ok(paths.into_iter().rev().collect())
 }
 
-fn latest_gen_file(dir: impl AsRef<Path>) -> Option<(PathBuf, u32)> {
-    let mut paths = generation_files(dir.as_ref()).ok()?;
-    let last = paths.pop();
-    if let Some(last) = last {
-        let n = extract_gen(&last);
+fn get_gen_file(dir: impl AsRef<Path>, idx: usize) -> Option<(PathBuf, u32)> {
+    let paths = generation_files(dir.as_ref()).ok()?;
+    let f = paths.get(idx);
+    if let Some(f) = f {
+        let n = extract_gen(&f);
         if n == -1 {
             None
         } else {
-            Some((last.path(), n as u32))
+            Some((f.path(), n as u32))
         }
     } else {
         None
@@ -72,32 +79,38 @@ fn diff_unique(old: &[String], new: &[String]) -> (Vec<String>, Vec<String>) {
     (added, removed)
 }
 
-fn resolve_changes(added: &[String], removed: &[String], dry_run: bool) -> anyhow::Result<()> {
+fn resolve_changes(
+    install_cmd: &str,
+    uninstall_cmd: &str,
+    added: &[String],
+    removed: &[String],
+    dry_run: bool,
+) -> anyhow::Result<()> {
     if added.is_empty() && removed.is_empty() {
         println!("Nothing to resolve!");
         return Ok(());
     }
     if dry_run {
         if !removed.is_empty() {
-            println!("nix-env -e {}", removed.join(" "));
+            println!("{uninstall_cmd} {}", removed.join(" "));
         }
         if !added.is_empty() {
-            println!("nix-env -iA nixpkgs.{}", added.join(" nixpkgs."));
+            println!("{install_cmd} {}", added.join(" "));
         }
     } else {
         if !removed.is_empty() {
-            let mut nix_env = Command::new("nix-env");
-            nix_env.arg("-e");
-            nix_env.args(removed);
-            nix_env.spawn()?.wait()?;
+            let cmd_n_args: Vec<_> = uninstall_cmd.split_whitespace().collect();
+            let mut cmd = Command::new(cmd_n_args[0]);
+            cmd.args(&cmd_n_args[1..]);
+            cmd.args(removed);
+            cmd.spawn()?.wait()?;
         }
         if !added.is_empty() {
-            let mut nix_env = Command::new("nix-env");
-            nix_env.arg("-iA");
-            for p in added {
-                nix_env.arg(format!("nixpkgs.{}", p));
-            }
-            nix_env.spawn()?.wait()?;
+            let cmd_n_args: Vec<_> = install_cmd.split_whitespace().collect();
+            let mut cmd = Command::new(cmd_n_args[0]);
+            cmd.args(&cmd_n_args[1..]);
+            cmd.args(added);
+            cmd.spawn()?.wait()?;
         }
     }
     Ok(())
@@ -106,43 +119,43 @@ fn resolve_changes(added: &[String], removed: &[String], dry_run: bool) -> anyho
 fn main() -> anyhow::Result<()> {
     // maybe we wanna work as root?
     let home = PathBuf::from(env::var("HOME").unwrap_or_default());
-    let nix0 = fs::read_to_string(home.join(".nix-packages.toml"))
-        .expect("No .nix-packages.toml file found");
+    let dpm_toml = fs::read_to_string(home.join(".dpm.toml"))
+        .expect("No .dpm.toml file found");
     let cache0 = env::var("XDG_CACHE_HOME").unwrap_or_default();
     let cache = if cache0.is_empty() {
-        home.join(".cache/nixme")
+        home.join(".cache/dpm")
     } else {
         PathBuf::from(cache0)
     };
-    if nix0.is_empty() {
-        eprintln!("Empty .nix-packages.toml\nterminating!");
+    if dpm_toml.is_empty() {
+        eprintln!("Empty .dpm.toml\nterminating!");
         return Ok(());
     }
     if !cache.exists() {
         fs::create_dir(&cache)?;
     }
-    let nix: Nix = toml::from_str(&nix0)?;
-    let latest_gen = latest_gen_file(&cache);
+    let dpm: Dpm = toml::from_str(&dpm_toml)?;
+    let latest_gen = get_gen_file(&cache, 0);
     let (latest_gen, n) = if let Some(f) = latest_gen {
-        (fs::read_to_string(f.0)?, f.1)
+        (toml::from_str(&fs::read_to_string(f.0)?)?, f.1)
     } else {
         let gen0 = cache.join("generation_0.toml");
-        let s = "packages = []";
-        fs::write(&gen0, s.as_bytes())?;
+        let mut dpm0 = dpm.clone();
+        dpm0.packages.clear();
+        fs::write(&gen0, toml::to_string(&dpm0)?.as_bytes())?;
         // assuming the above worked!
-        (s.to_owned(), 0)
+        (dpm0, 0)
     };
-    let latest_gen: Nix = toml::from_str(&latest_gen)?;
 
     let args = Args::parse();
     match &args.command {
         Commands::Switch => {
-            let (added, removed) = diff_unique(&latest_gen.packages, &nix.packages);
-            resolve_changes(&added, &removed, args.dry_run)?;
+            let (added, removed) = diff_unique(&latest_gen.packages, &dpm.packages);
+            resolve_changes(&dpm.install, &dpm.uninstall, &added, &removed, args.dry_run)?;
             if (!removed.is_empty() || !added.is_empty()) && !args.dry_run {
                 fs::write(
                     cache.join(format!("generation_{}.toml", n + 1)),
-                    nix0.as_bytes(),
+                    dpm_toml.as_bytes(),
                 )?;
             }
         }
@@ -153,28 +166,50 @@ fn main() -> anyhow::Result<()> {
                 let time = chrono::DateTime::<chrono::Local>::from(p.metadata()?.created()?);
                 println!(
                     "{}\t\t{}\t\t{}",
-                    p.path().file_stem().unwrap().to_str().unwrap(),
+                    p.path()
+                        .file_stem()
+                        .context("Failed to get stem")?
+                        .to_str()
+                        .context("Failed to convert file name to str")?,
                     time.date_naive(),
                     time.time()
                 );
             }
         }
         Commands::Rollback { generation } => {
-            let new_gen: Nix = toml::from_str(&fs::read_to_string(
-                cache.join(format!("{generation}.toml")),
-            )?)?;
-            let (added, removed) = diff_unique(&latest_gen.packages, &new_gen.packages);
-            resolve_changes(&added, &removed, args.dry_run)?;
-        }
-        Commands::Gc => {
-            if args.dry_run {
-                println!("nix-collect-garbage");
+            let new_gen: Dpm = if let Some(generation) = generation {
+                toml::from_str(&fs::read_to_string(
+                    cache.join(format!("{generation}.toml")),
+                )?)?
             } else {
-                let mut nix_gc = Command::new("nix-collect-garbage");
-                nix_gc.spawn()?.wait()?;
+                toml::from_str(&fs::read_to_string(
+                    get_gen_file(&cache, 1).context("Failed to get last generation file")?.0,
+                )?)?
+            };
+            let (added, removed) = diff_unique(&latest_gen.packages, &new_gen.packages);
+            resolve_changes(&dpm.install, &dpm.uninstall, &added, &removed, args.dry_run)?;
+            fs::write(home.join(".dpm.toml"), toml::to_string(&new_gen)?.as_bytes())?;
+        }
+        Commands::Update => {
+            if args.dry_run {
+                println!("{}", dpm.update);
+            } else {
+                let cmd_n_args: Vec<_> = dpm.update.split_whitespace().collect();
+                let mut dpm_gc = Command::new(cmd_n_args[0]);
+                dpm_gc.args(&cmd_n_args[1..]);
+                dpm_gc.spawn()?.wait()?;
+            }
+        }
+        Commands::Upgrade => {
+            if args.dry_run {
+                println!("{}", dpm.upgrade);
+            } else {
+                let cmd_n_args: Vec<_> = dpm.upgrade.split_whitespace().collect();
+                let mut dpm_gc = Command::new(cmd_n_args[0]);
+                dpm_gc.args(&cmd_n_args[1..]);
+                dpm_gc.spawn()?.wait()?;
             }
         }
     }
-
     Ok(())
 }
