@@ -72,10 +72,8 @@ fn get_gen_file(dir: impl AsRef<Path>, idx: usize) -> Option<(PathBuf, u32)> {
 fn diff_unique(old: &[String], new: &[String]) -> (Vec<String>, Vec<String>) {
     let old_set: HashSet<_> = old.iter().cloned().collect();
     let new_set: HashSet<_> = new.iter().cloned().collect();
-
     let added = new_set.difference(&old_set).cloned().collect();
     let removed = old_set.difference(&new_set).cloned().collect();
-
     (added, removed)
 }
 
