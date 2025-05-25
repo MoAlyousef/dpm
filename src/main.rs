@@ -58,7 +58,7 @@ fn get_gen_file(dir: impl AsRef<Path>, idx: usize) -> Option<(PathBuf, u32)> {
     let paths = generation_files(dir.as_ref()).ok()?;
     let f = paths.get(idx);
     if let Some(f) = f {
-        let n = extract_gen(&f);
+        let n = extract_gen(f);
         if n == -1 {
             None
         } else {
@@ -115,15 +115,12 @@ fn resolve_changes(
 }
 
 fn main() -> anyhow::Result<()> {
-    // maybe we wanna work as root?
-    let home = PathBuf::from(env::var("HOME").unwrap_or_default());
-    let dpm_toml = fs::read_to_string(home.join(".dpm.toml"))
-        .expect("No .dpm.toml file found");
-    let cache0 = env::var("XDG_CACHE_HOME").unwrap_or_default();
-    let cache = if cache0.is_empty() {
-        home.join(".cache/dpm")
+    let home = PathBuf::from(env::var("HOME").context("No HOME directory set")?);
+    let dpm_toml = fs::read_to_string(home.join(".dpm.toml"))?;
+    let cache = if let Ok(p) = env::var("XDG_CACHE_HOME") {
+        PathBuf::from(p).join("dpm")
     } else {
-        PathBuf::from(cache0)
+        home.join(".cache/dpm")
     };
     if dpm_toml.is_empty() {
         eprintln!("Empty .dpm.toml\nterminating!");
@@ -157,6 +154,21 @@ fn main() -> anyhow::Result<()> {
                 )?;
             }
         }
+        Commands::Rollback { generation } => {
+            let new_gen_file: String = if let Some(generation) = generation {
+                fs::read_to_string(cache.join(format!("{generation}.toml")))?
+            } else {
+                fs::read_to_string(
+                    get_gen_file(&cache, 1)
+                        .context("Failed to get last generation file")?
+                        .0,
+                )?
+            };
+            let new_gen: Dpm = toml::from_str(&new_gen_file)?;
+            let (added, removed) = diff_unique(&latest_gen.packages, &new_gen.packages);
+            resolve_changes(&dpm.install, &dpm.uninstall, &added, &removed, args.dry_run)?;
+            fs::write(home.join(".dpm.toml"), new_gen_file.as_bytes())?;
+        }
         Commands::List => {
             let paths = generation_files(&cache)?;
             for path in paths {
@@ -173,20 +185,6 @@ fn main() -> anyhow::Result<()> {
                     time.time()
                 );
             }
-        }
-        Commands::Rollback { generation } => {
-            let new_gen: Dpm = if let Some(generation) = generation {
-                toml::from_str(&fs::read_to_string(
-                    cache.join(format!("{generation}.toml")),
-                )?)?
-            } else {
-                toml::from_str(&fs::read_to_string(
-                    get_gen_file(&cache, 1).context("Failed to get last generation file")?.0,
-                )?)?
-            };
-            let (added, removed) = diff_unique(&latest_gen.packages, &new_gen.packages);
-            resolve_changes(&dpm.install, &dpm.uninstall, &added, &removed, args.dry_run)?;
-            fs::write(home.join(".dpm.toml"), toml::to_string(&new_gen)?.as_bytes())?;
         }
         Commands::Update => {
             if args.dry_run {
