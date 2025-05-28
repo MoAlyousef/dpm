@@ -8,12 +8,23 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+struct Dpmm {
+    managers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Dpm {
+    name: Option<String>,
     update: String,
     upgrade: String,
     install: String,
     uninstall: String,
     packages: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Generation {
+    managers: Vec<Dpm>,
 }
 
 #[derive(Parser, Debug)]
@@ -29,7 +40,7 @@ struct Args {
 enum Commands {
     /// Switch to the new configuration
     Switch,
-    /// List dpm generations
+    /// List dpmm generations
     List,
     /// Rollsback to a previous generation
     Rollback { generation: Option<String> },
@@ -116,41 +127,72 @@ fn resolve_changes(
 
 fn main() -> anyhow::Result<()> {
     let home = PathBuf::from(env::var("HOME").context("No HOME directory set")?);
-    let dpm_toml = fs::read_to_string(home.join(".dpm.toml"))?;
-    let cache = if let Ok(p) = env::var("XDG_CACHE_HOME") {
-        PathBuf::from(p).join("dpm")
+    let config = if let Ok(p) = env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(p).join("dpmm")
     } else {
-        home.join(".cache/dpm")
+        home.join(".config/dpmm")
     };
-    if dpm_toml.is_empty() {
-        eprintln!("Empty .dpm.toml\nterminating!");
+    let dpmm_toml = fs::read_to_string(config.join("dpmm.toml"))?;
+    let cache = if let Ok(p) = env::var("XDG_CACHE_HOME") {
+        PathBuf::from(p).join("dpmm")
+    } else {
+        home.join(".cache/dpmm")
+    };
+    if dpmm_toml.is_empty() {
+        eprintln!("Empty dpmm.toml\nterminating!");
         return Ok(());
     }
     if !cache.exists() {
         fs::create_dir(&cache)?;
     }
-    let dpm: Dpm = toml::from_str(&dpm_toml)?;
+    let dpmm: Dpmm = toml::from_str(&dpmm_toml)?;
+    let mut managers: Vec<Dpm> = vec![];
+    for manager in dpmm.managers {
+        let fname = format!("{manager}.toml");
+        let mut toml: Dpm = toml::from_str(&fs::read_to_string(config.join(&fname))?)?;
+        toml.name = Some(manager);
+        managers.push(toml);
+    }
     let latest_gen = get_gen_file(&cache, 0);
     let (latest_gen, n) = if let Some(f) = latest_gen {
         (toml::from_str(&fs::read_to_string(f.0)?)?, f.1)
     } else {
         let gen0 = cache.join("generation_0.toml");
-        let mut dpm0 = dpm.clone();
-        dpm0.packages.clear();
-        fs::write(&gen0, toml::to_string(&dpm0)?.as_bytes())?;
+        let mut managers0 = managers.clone();
+        for manager in &mut managers0 {
+            manager.packages.clear();
+        }
+        let managers0 = Generation {
+            managers: managers0,
+        };
+        fs::write(&gen0, toml::to_string(&managers0)?.as_bytes())?;
         // assuming the above worked!
-        (dpm0, 0)
+        (managers0, 0)
     };
+
+    let current_gen = Generation { managers };
 
     let args = Args::parse();
     match &args.command {
         Commands::Switch => {
-            let (added, removed) = diff_unique(&latest_gen.packages, &dpm.packages);
-            resolve_changes(&dpm.install, &dpm.uninstall, &added, &removed, args.dry_run)?;
-            if (!removed.is_empty() || !added.is_empty()) && !args.dry_run {
+            let mut changed = false;
+            for m in &current_gen.managers {
+                let mname = m.name.clone().unwrap().clone();
+                // ignore removed managers
+                if let Some(corresp) = latest_gen
+                    .managers
+                    .iter()
+                    .find(|manager| manager.name == Some(mname.clone()))
+                {
+                    let (added, removed) = diff_unique(&corresp.packages, &m.packages);
+                    resolve_changes(&m.install, &m.uninstall, &added, &removed, args.dry_run)?;
+                    changed = !removed.is_empty() || !added.is_empty();
+                }
+            }
+            if changed && !args.dry_run {
                 fs::write(
                     cache.join(format!("generation_{}.toml", n + 1)),
-                    dpm_toml.as_bytes(),
+                    toml::to_string(&current_gen)?,
                 )?;
             }
         }
@@ -164,10 +206,23 @@ fn main() -> anyhow::Result<()> {
                         .0,
                 )?
             };
-            let new_gen: Dpm = toml::from_str(&new_gen_file)?;
-            let (added, removed) = diff_unique(&latest_gen.packages, &new_gen.packages);
-            resolve_changes(&dpm.install, &dpm.uninstall, &added, &removed, args.dry_run)?;
-            fs::write(home.join(".dpm.toml"), new_gen_file.as_bytes())?;
+            let new_gen: Generation = toml::from_str(&new_gen_file)?;
+            for m in &new_gen.managers {
+                let mname = m.name.clone().unwrap().clone();
+                // ignore removed managers
+                if let Some(corresp) = latest_gen
+                    .managers
+                    .iter()
+                    .find(|manager| manager.name == Some(mname.clone()))
+                {
+                    let (added, removed) = diff_unique(&corresp.packages, &m.packages);
+                    resolve_changes(&m.install, &m.uninstall, &added, &removed, args.dry_run)?;
+                }
+                fs::write(
+                    config.join(format!("{mname}.toml")),
+                    toml::to_string::<Dpm>(m)?.as_bytes(),
+                )?;
+            }
         }
         Commands::List => {
             let paths = generation_files(&cache)?;
@@ -188,22 +243,30 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Update => {
             if args.dry_run {
-                println!("{}", dpm.update);
+                for d in current_gen.managers {
+                    println!("{}", d.update);
+                }
             } else {
-                let cmd_n_args: Vec<_> = dpm.update.split_whitespace().collect();
-                let mut dpm_gc = Command::new(cmd_n_args[0]);
-                dpm_gc.args(&cmd_n_args[1..]);
-                dpm_gc.spawn()?.wait()?;
+                for d in current_gen.managers {
+                    let cmd_n_args: Vec<_> = d.update.split_whitespace().collect();
+                    let mut d = Command::new(cmd_n_args[0]);
+                    d.args(&cmd_n_args[1..]);
+                    d.spawn()?.wait()?;
+                }
             }
         }
         Commands::Upgrade => {
             if args.dry_run {
-                println!("{}", dpm.upgrade);
+                for d in current_gen.managers {
+                    println!("{}", d.upgrade);
+                }
             } else {
-                let cmd_n_args: Vec<_> = dpm.upgrade.split_whitespace().collect();
-                let mut dpm_gc = Command::new(cmd_n_args[0]);
-                dpm_gc.args(&cmd_n_args[1..]);
-                dpm_gc.spawn()?.wait()?;
+                for d in current_gen.managers {
+                    let cmd_n_args: Vec<_> = d.upgrade.split_whitespace().collect();
+                    let mut d = Command::new(cmd_n_args[0]);
+                    d.args(&cmd_n_args[1..]);
+                    d.spawn()?.wait()?;
+                }
             }
         }
     }

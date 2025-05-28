@@ -1,15 +1,15 @@
-# dpm
+# dpmm
 
-A simplistic declarative package manager for linux, which only manages packages. No dotfile management!
-Configurable using a $HOME/.dpm.toml file.
+A simplistic declarative package manager manager for linux, which only manages packages managers. No dotfile management!
+Configurable using a $HOME/.config/dpmm.toml file.
 
 ## Usage
 ```bash
-Usage: dpm [OPTIONS] <COMMAND>
+Usage: dpmm [OPTIONS] <COMMAND>
 
 Commands:
   switch    Switch to the new configuration
-  list      List dpm generations
+  list      List dpmm generations
   rollback  Rollsback to a previous generation
   update    Update package list
   upgrade   Upgrade packages
@@ -21,7 +21,12 @@ Options:
   -V, --version  Print version
 ```
 
-example $HOME/.dpm.toml:
+example $HOME/config/dpmm/dpmm.toml:
+```toml
+managers = ["apt"]
+```
+
+$HOME/config/dpmm/apt.toml:
 ```toml
 update = "sudo apt-get update"
 upgrade = "sudo apt-get upgrade -y"
@@ -36,8 +41,8 @@ packages = [
 ## Building
 Requires a fairly recent Rust version:
 ```bash
-git clone https://github.com/MoAlyousef/dpm
-cd dpm
+git clone https://github.com/MoAlyousef/dpmm
+cd dpmm
 cargo build --release
 ```
 
