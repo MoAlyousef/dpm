@@ -26,7 +26,7 @@ example $HOME/config/dpmm/dpmm.toml:
 managers = ["apt"]
 ```
 
-$HOME/config/dpmm/apt.toml:
+$HOME/.config/dpmm/apt.toml:
 ```toml
 update = "sudo apt-get update"
 upgrade = "sudo apt-get upgrade -y"
