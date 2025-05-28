@@ -19,6 +19,7 @@ struct Dpm {
     upgrade: String,
     install: String,
     uninstall: String,
+    supports_multi_args: Option<bool>,
     packages: Vec<String>,
 }
 
@@ -91,6 +92,7 @@ fn diff_unique(old: &[String], new: &[String]) -> (Vec<String>, Vec<String>) {
 fn resolve_changes(
     install_cmd: &str,
     uninstall_cmd: &str,
+    supports_multi: bool,
     added: &[String],
     removed: &[String],
     dry_run: bool,
@@ -99,27 +101,54 @@ fn resolve_changes(
         println!("Nothing to resolve!");
         return Ok(());
     }
-    if dry_run {
-        if !removed.is_empty() {
-            println!("{uninstall_cmd} {}", removed.join(" "));
-        }
-        if !added.is_empty() {
-            println!("{install_cmd} {}", added.join(" "));
-        }
-    } else {
-        if !removed.is_empty() {
+    if !removed.is_empty() {
+        if supports_multi {
+            let uninstall_cmd = uninstall_cmd.replace("$", &removed.join(" "));
             let cmd_n_args: Vec<_> = uninstall_cmd.split_whitespace().collect();
             let mut cmd = Command::new(cmd_n_args[0]);
             cmd.args(&cmd_n_args[1..]);
-            cmd.args(removed);
-            cmd.spawn()?.wait()?;
+            if dry_run {
+                println!("{cmd:?}");
+            } else {
+                cmd.spawn()?.wait()?;
+            }
+        } else {
+            for rem in removed {
+                let uninstall_cmd = uninstall_cmd.replace("$", rem);
+                let cmd_n_args: Vec<_> = uninstall_cmd.split_whitespace().collect();
+                let mut cmd = Command::new(cmd_n_args[0]);
+                cmd.args(&cmd_n_args[1..]);
+                if dry_run {
+                    println!("{cmd:?}");
+                } else {
+                    cmd.spawn()?.wait()?;
+                }
+            }
         }
-        if !added.is_empty() {
+    }
+    if !added.is_empty() {
+        if supports_multi {
+            let install_cmd = install_cmd.replace("$", &added.join(" "));
             let cmd_n_args: Vec<_> = install_cmd.split_whitespace().collect();
             let mut cmd = Command::new(cmd_n_args[0]);
             cmd.args(&cmd_n_args[1..]);
-            cmd.args(added);
-            cmd.spawn()?.wait()?;
+            if dry_run {
+                println!("{cmd:?}");
+            } else {
+                cmd.spawn()?.wait()?;
+            }
+        } else {
+            for a in added {
+                let uninstall_cmd = uninstall_cmd.replace("$", a);
+                let cmd_n_args: Vec<_> = uninstall_cmd.split_whitespace().collect();
+                let mut cmd = Command::new(cmd_n_args[0]);
+                cmd.args(&cmd_n_args[1..]);
+                if dry_run {
+                    println!("{cmd:?}");
+                } else {
+                    cmd.spawn()?.wait()?;
+                }
+            }
         }
     }
     Ok(())
@@ -185,15 +214,34 @@ fn main() -> anyhow::Result<()> {
                     .find(|manager| manager.name == Some(mname.clone()))
                 {
                     let (added, removed) = diff_unique(&corresp.packages, &m.packages);
-                    resolve_changes(&m.install, &m.uninstall, &added, &removed, args.dry_run)?;
+                    resolve_changes(
+                        &m.install,
+                        &m.uninstall,
+                        m.supports_multi_args.unwrap_or(true),
+                        &added,
+                        &removed,
+                        args.dry_run,
+                    )?;
                     changed = !removed.is_empty() || !added.is_empty();
+                } else {
+                    resolve_changes(
+                        &m.install,
+                        &m.uninstall,
+                        m.supports_multi_args.unwrap_or(true),
+                        &m.packages,
+                        &[],
+                        args.dry_run,
+                    )?;
+                    changed = true;
                 }
             }
-            if changed && !args.dry_run {
-                fs::write(
-                    cache.join(format!("generation_{}.toml", n + 1)),
-                    toml::to_string(&current_gen)?,
-                )?;
+            if changed {
+                let t = toml::to_string(&current_gen)?;
+                if !args.dry_run {
+                    fs::write(cache.join(format!("generation_{}.toml", n + 1)), t)?;
+                } else {
+                    println!("{t}");
+                }
             }
         }
         Commands::Rollback { generation } => {
@@ -216,12 +264,30 @@ fn main() -> anyhow::Result<()> {
                     .find(|manager| manager.name == Some(mname.clone()))
                 {
                     let (added, removed) = diff_unique(&corresp.packages, &m.packages);
-                    resolve_changes(&m.install, &m.uninstall, &added, &removed, args.dry_run)?;
+                    resolve_changes(
+                        &m.install,
+                        &m.uninstall,
+                        m.supports_multi_args.unwrap_or(true),
+                        &added,
+                        &removed,
+                        args.dry_run,
+                    )?;
+                } else {
+                    resolve_changes(
+                        &m.install,
+                        &m.uninstall,
+                        m.supports_multi_args.unwrap_or(true),
+                        &m.packages,
+                        &[],
+                        args.dry_run,
+                    )?;
                 }
-                fs::write(
-                    config.join(format!("{mname}.toml")),
-                    toml::to_string::<Dpm>(m)?.as_bytes(),
-                )?;
+                let t = toml::to_string::<Dpm>(m)?;
+                if !args.dry_run {
+                    fs::write(config.join(format!("{mname}.toml")), t)?;
+                } else {
+                    println!("{t}");
+                }
             }
         }
         Commands::List => {

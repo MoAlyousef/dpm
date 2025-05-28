@@ -30,8 +30,8 @@ $HOME/config/dpmm/apt.toml:
 ```toml
 update = "sudo apt-get update"
 upgrade = "sudo apt-get upgrade -y"
-install = "sudo apt-get install -y"
-uninstall = "sudo apt-get purge -y"
+install = "sudo apt-get install -y $"
+uninstall = "sudo apt-get purge -y $"
 packages = [
   "jq",
   "vim"
