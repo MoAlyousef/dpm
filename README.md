@@ -9,6 +9,8 @@ Usage: dpmm [OPTIONS] <COMMAND>
 Commands:
   switch    Switch to the new configuration
   list      List dpmm generations
+  pm        List managed packaged managers
+  config    Get config path
   rollback  Rollsback to a previous generation
   update    Update package list
   upgrade   Upgrade packages
@@ -54,15 +56,15 @@ cargo build --release
 
 Copy the resulting binary into a PATH directory.
 
-## Info
+## Schemas
 
-The Dpmm format:
+#### Dpmm schema:
 ```toml
 # These identify the managers in your config directory, so apt for example maps to apt.toml, brew maps to brew.toml.
 # These are also handled sequentially
 managers = ["apt", "brew"]
 ```
-The Dpm format:
+#### Dpm schema:
 ```toml
 # OPTIONAL: the file's stem is used to identify the manager
 name = "apt"
@@ -83,5 +85,7 @@ packages = [
   "vim"
 ]
 ```
+
+## Commands
 
 The dpmm update and upgrade commands, require the name of the manager, or an explicit `all` argument. This is to avoid breaking updates/upgrades.

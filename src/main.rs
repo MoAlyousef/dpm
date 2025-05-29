@@ -1,11 +1,12 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    collections::HashSet,
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 #[allow(dead_code)]
 mod unix {
@@ -61,8 +62,15 @@ enum Commands {
     Switch,
     /// List dpmm generations
     List,
+    /// List managed packaged managers
+    Pm,
+    /// Get config path
+    Config,
     /// Rollsback to a previous generation
-    Rollback { generation: Option<String> },
+    Rollback {
+        /// Optional: Generation name
+        generation: Option<String>,
+    },
     /// Update package list
     Update {
         /// You can pass the manager name to update it specifically, or `all` to update all managers
@@ -202,10 +210,10 @@ fn main() -> anyhow::Result<()> {
     }
     let dpmm: Dpmm = toml::from_str(&dpmm_toml)?;
     let mut managers: Vec<Dpm> = vec![];
-    for manager in dpmm.managers {
+    for manager in &dpmm.managers {
         let fname = format!("{manager}.toml");
         let mut toml: Dpm = toml::from_str(&fs::read_to_string(config.join(&fname))?)?;
-        toml.name = Some(manager);
+        toml.name = Some(manager.clone());
         managers.push(toml);
     }
     let latest_gen = get_gen_file(&cache, 0);
@@ -356,6 +364,14 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+        Commands::Pm => {
+            for m in &dpmm.managers {
+                println!("{}", m);
+            }
+        }
+        Commands::Config => {
+            println!("{:?}", config);
         }
     }
     Ok(())
