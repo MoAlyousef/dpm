@@ -1,0 +1,28 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build --release
+    - name: Create dpmm.toml
+      run: |
+        echo "managers = ["apt"]" > ${{ runner.home }}/.config/dpmm/dpmm.toml
+        echo 'install = "sudo apt-get install -y $"\nuninstall = "sudo apt-get purge -y $"\npackages=["jq", "lua5.1"]' > ${{ runner.home }}/.config/dpmm/apt.toml
+        ./target/release/dpmm switch
+        echo 'install = "sudo apt-get install -y $"\nuninstall = "sudo apt-get purge -y $"\npackages=["jq"]' > ${{ runner.home }}/.config/dpmm/apt.toml
+        ./target/release/dpmm switch
+        ./target/release/dpmm rollback
