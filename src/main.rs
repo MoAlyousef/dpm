@@ -7,6 +7,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[allow(dead_code)]
+mod unix {
+    pub const CONFIG_HOME: &str = "XDG_CONFIG_HOME";
+    pub const CACHE_HOME: &str = "XDG_CACHE_HOME";
+}
+
+#[allow(dead_code)]
+mod windows {
+    pub const CONFIG_HOME: &str = "APPDATA";
+    pub const CACHE_HOME: &str = "LOCALAPPDATA";
+}
+
+#[cfg(windows)]
+use windows::*;
+
+#[cfg(not(windows))]
+use unix::*;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Dpmm {
     managers: Vec<String>,
@@ -15,8 +33,8 @@ struct Dpmm {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Dpm {
     name: Option<String>,
-    update: String,
-    upgrade: String,
+    update: Option<String>,
+    upgrade: Option<String>,
     install: String,
     uninstall: String,
     supports_multi_args: Option<bool>,
@@ -46,9 +64,15 @@ enum Commands {
     /// Rollsback to a previous generation
     Rollback { generation: Option<String> },
     /// Update package list
-    Update,
+    Update {
+        /// You can pass the manager name to update it specifically, or `all` to update all managers
+        manager: String,
+    },
     /// Upgrade packages
-    Upgrade,
+    Upgrade {
+        /// You can pass the manager name to upgrade it specifically, `all` to upgrade all managers
+        manager: String,
+    },
 }
 
 fn extract_gen(s: &fs::DirEntry) -> i32 {
@@ -90,36 +114,38 @@ fn diff_unique(old: &[String], new: &[String]) -> (Vec<String>, Vec<String>) {
 }
 
 fn resolve_changes(
-    install_cmd: &str,
-    uninstall_cmd: &str,
-    supports_multi: bool,
+    manager: &Dpm,
     added: &[String],
     removed: &[String],
     dry_run: bool,
 ) -> anyhow::Result<()> {
     if added.is_empty() && removed.is_empty() {
-        println!("Nothing to resolve!");
+        println!(
+            "Nothing to resolve with {}!",
+            manager.name.as_ref().unwrap()
+        );
         return Ok(());
     }
+    let supports_multi = manager.supports_multi_args.unwrap_or(true);
     if !removed.is_empty() {
         if supports_multi {
-            let uninstall_cmd = uninstall_cmd.replace("$", &removed.join(" "));
+            let uninstall_cmd = manager.uninstall.replace("$", &removed.join(" "));
             let cmd_n_args: Vec<_> = uninstall_cmd.split_whitespace().collect();
             let mut cmd = Command::new(cmd_n_args[0]);
             cmd.args(&cmd_n_args[1..]);
             if dry_run {
-                println!("{cmd:?}");
+                println!("Uninstalls:\n{cmd:?}");
             } else {
                 cmd.spawn()?.wait()?;
             }
         } else {
             for rem in removed {
-                let uninstall_cmd = uninstall_cmd.replace("$", rem);
+                let uninstall_cmd = manager.uninstall.replace("$", rem);
                 let cmd_n_args: Vec<_> = uninstall_cmd.split_whitespace().collect();
                 let mut cmd = Command::new(cmd_n_args[0]);
                 cmd.args(&cmd_n_args[1..]);
                 if dry_run {
-                    println!("{cmd:?}");
+                    println!("Uninstalls:\n{cmd:?}");
                 } else {
                     cmd.spawn()?.wait()?;
                 }
@@ -128,23 +154,23 @@ fn resolve_changes(
     }
     if !added.is_empty() {
         if supports_multi {
-            let install_cmd = install_cmd.replace("$", &added.join(" "));
+            let install_cmd = manager.install.replace("$", &added.join(" "));
             let cmd_n_args: Vec<_> = install_cmd.split_whitespace().collect();
             let mut cmd = Command::new(cmd_n_args[0]);
             cmd.args(&cmd_n_args[1..]);
             if dry_run {
-                println!("{cmd:?}");
+                println!("Installs:\n{cmd:?}");
             } else {
                 cmd.spawn()?.wait()?;
             }
         } else {
             for a in added {
-                let uninstall_cmd = uninstall_cmd.replace("$", a);
+                let uninstall_cmd = manager.install.replace("$", a);
                 let cmd_n_args: Vec<_> = uninstall_cmd.split_whitespace().collect();
                 let mut cmd = Command::new(cmd_n_args[0]);
                 cmd.args(&cmd_n_args[1..]);
                 if dry_run {
-                    println!("{cmd:?}");
+                    println!("Installs:\n{cmd:?}");
                 } else {
                     cmd.spawn()?.wait()?;
                 }
@@ -156,16 +182,16 @@ fn resolve_changes(
 
 fn main() -> anyhow::Result<()> {
     let home = PathBuf::from(env::var("HOME").context("No HOME directory set")?);
-    let config = if let Ok(p) = env::var("XDG_CONFIG_HOME") {
+    let config = if let Ok(p) = env::var(CONFIG_HOME) {
         PathBuf::from(p).join("dpmm")
     } else {
-        home.join(".config/dpmm")
+        home.join(".config").join("dpmm")
     };
     let dpmm_toml = fs::read_to_string(config.join("dpmm.toml"))?;
-    let cache = if let Ok(p) = env::var("XDG_CACHE_HOME") {
+    let cache = if let Ok(p) = env::var(CACHE_HOME) {
         PathBuf::from(p).join("dpmm")
     } else {
-        home.join(".cache/dpmm")
+        home.join(".cache").join("dpmm")
     };
     if dpmm_toml.is_empty() {
         eprintln!("Empty dpmm.toml\nterminating!");
@@ -206,7 +232,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Switch => {
             let mut changed = false;
             for m in &current_gen.managers {
-                let mname = m.name.clone().unwrap().clone();
+                let mname = m.name.as_ref().unwrap();
                 // ignore removed managers
                 if let Some(corresp) = latest_gen
                     .managers
@@ -214,24 +240,10 @@ fn main() -> anyhow::Result<()> {
                     .find(|manager| manager.name == Some(mname.clone()))
                 {
                     let (added, removed) = diff_unique(&corresp.packages, &m.packages);
-                    resolve_changes(
-                        &m.install,
-                        &m.uninstall,
-                        m.supports_multi_args.unwrap_or(true),
-                        &added,
-                        &removed,
-                        args.dry_run,
-                    )?;
+                    resolve_changes(m, &added, &removed, args.dry_run)?;
                     changed = !removed.is_empty() || !added.is_empty();
                 } else {
-                    resolve_changes(
-                        &m.install,
-                        &m.uninstall,
-                        m.supports_multi_args.unwrap_or(true),
-                        &m.packages,
-                        &[],
-                        args.dry_run,
-                    )?;
+                    resolve_changes(m, &m.packages, &[], args.dry_run)?;
                     changed = true;
                 }
             }
@@ -240,7 +252,7 @@ fn main() -> anyhow::Result<()> {
                 if !args.dry_run {
                     fs::write(cache.join(format!("generation_{}.toml", n + 1)), t)?;
                 } else {
-                    println!("{t}");
+                    println!("writes to generation_{}.toml:\n{t}", n + 1);
                 }
             }
         }
@@ -255,8 +267,10 @@ fn main() -> anyhow::Result<()> {
                 )?
             };
             let new_gen: Generation = toml::from_str(&new_gen_file)?;
+            let mut names = vec![];
             for m in &new_gen.managers {
-                let mname = m.name.clone().unwrap().clone();
+                let mname = m.name.as_ref().unwrap();
+                names.push(mname.clone());
                 // ignore removed managers
                 if let Some(corresp) = latest_gen
                     .managers
@@ -264,30 +278,22 @@ fn main() -> anyhow::Result<()> {
                     .find(|manager| manager.name == Some(mname.clone()))
                 {
                     let (added, removed) = diff_unique(&corresp.packages, &m.packages);
-                    resolve_changes(
-                        &m.install,
-                        &m.uninstall,
-                        m.supports_multi_args.unwrap_or(true),
-                        &added,
-                        &removed,
-                        args.dry_run,
-                    )?;
+                    resolve_changes(m, &added, &removed, args.dry_run)?;
                 } else {
-                    resolve_changes(
-                        &m.install,
-                        &m.uninstall,
-                        m.supports_multi_args.unwrap_or(true),
-                        &m.packages,
-                        &[],
-                        args.dry_run,
-                    )?;
+                    resolve_changes(m, &m.packages, &[], args.dry_run)?;
                 }
                 let t = toml::to_string::<Dpm>(m)?;
                 if !args.dry_run {
                     fs::write(config.join(format!("{mname}.toml")), t)?;
                 } else {
-                    println!("{t}");
+                    println!("writes to {mname}.toml:\n{t}");
                 }
+            }
+            let dpmm: String = toml::to_string(&Dpmm { managers: names })?;
+            if !args.dry_run {
+                fs::write(config.join("dpmm.toml"), dpmm)?;
+            } else {
+                println!("writes to dpmm.toml:\n{dpmm}");
             }
         }
         Commands::List => {
@@ -307,31 +313,47 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
-        Commands::Update => {
+        Commands::Update { manager } => {
             if args.dry_run {
                 for d in current_gen.managers {
-                    println!("{}", d.update);
+                    if d.name == Some(manager.to_string()) || manager == "all" {
+                        if let Some(update) = d.update {
+                            println!("Updates:\n{}", update);
+                        }
+                    }
                 }
             } else {
                 for d in current_gen.managers {
-                    let cmd_n_args: Vec<_> = d.update.split_whitespace().collect();
-                    let mut d = Command::new(cmd_n_args[0]);
-                    d.args(&cmd_n_args[1..]);
-                    d.spawn()?.wait()?;
+                    if d.name == Some(manager.to_string()) || manager == "all" {
+                        if let Some(update) = d.update {
+                            let cmd_n_args: Vec<_> = update.split_whitespace().collect();
+                            let mut d = Command::new(cmd_n_args[0]);
+                            d.args(&cmd_n_args[1..]);
+                            d.spawn()?.wait()?;
+                        }
+                    }
                 }
             }
         }
-        Commands::Upgrade => {
+        Commands::Upgrade { manager } => {
             if args.dry_run {
                 for d in current_gen.managers {
-                    println!("{}", d.upgrade);
+                    if d.name == Some(manager.to_string()) || manager == "all" {
+                        if let Some(upgrade) = d.upgrade {
+                            println!("Upgrades:\n{}", upgrade);
+                        }
+                    }
                 }
             } else {
                 for d in current_gen.managers {
-                    let cmd_n_args: Vec<_> = d.upgrade.split_whitespace().collect();
-                    let mut d = Command::new(cmd_n_args[0]);
-                    d.args(&cmd_n_args[1..]);
-                    d.spawn()?.wait()?;
+                    if d.name == Some(manager.to_string()) || manager == "all" {
+                        if let Some(upgrade) = d.upgrade {
+                            let cmd_n_args: Vec<_> = upgrade.split_whitespace().collect();
+                            let mut d = Command::new(cmd_n_args[0]);
+                            d.args(&cmd_n_args[1..]);
+                            d.spawn()?.wait()?;
+                        }
+                    }
                 }
             }
         }
